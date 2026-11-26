@@ -87,6 +87,14 @@ pub trait Sound: Send {
 	/// handle for the sound is dropped.
 	#[must_use]
 	fn finished(&self) -> bool;
+
+	/// Immediately stops the sound, cutting off any fade-out.
+	///
+	/// This is called by a mixer track when the track is removed so that sound
+	/// playback ends in the same commit that starts tearing the track down.
+	/// After this is called, [`finished`](Sound::finished) should return
+	/// `true` and [`process`](Sound::process) should produce silence.
+	fn stop_immediately(&mut self) {}
 }
 
 /// The playback state of a sound.

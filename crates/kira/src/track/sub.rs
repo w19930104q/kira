@@ -8,7 +8,7 @@ pub use handle::*;
 pub use spatial_builder::*;
 pub use spatial_handle::*;
 
-use std::{error::Error, f32::consts::FRAC_PI_8, fmt::Display, sync::Arc};
+use std::{error::Error, f32::consts::FRAC_PI_8, fmt::Display, sync::Arc, time::Duration};
 
 use glam::{Quat, Vec3};
 
@@ -54,6 +54,33 @@ pub(crate) struct Track {
 	playback_state_manager: PlaybackStateManager,
 	temp_buffer: Vec<Frame>,
 	internal_buffer_size: usize,
+	sample_rate: u32,
+	removal_tail_duration: Option<Duration>,
+	removal_state: RemovalState,
+	remaining_flush_samples: u64,
+}
+
+/// Tracks the coordinated teardown of a track.
+///
+/// When a track is marked for removal, its sounds are stopped immediately and
+/// the effects are kept connected until their tails have flushed, at which
+/// point the whole track is dropped in a single commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemovalState {
+	/// The track is running normally.
+	Active,
+	/// Sounds have been stopped and the effects are ringing out.
+	Flushing,
+}
+
+/// A tween that applies instantly, used to un-pause a track that is flushing
+/// its effects without fading in and eating into the tail.
+fn instant_tween() -> Tween {
+	Tween {
+		start_time: StartTime::Immediate,
+		duration: Duration::ZERO,
+		easing: Easing::default(),
+	}
 }
 
 impl Track {
@@ -74,6 +101,7 @@ impl Track {
 	}
 
 	pub fn init_effects(&mut self, sample_rate: u32) {
+		self.sample_rate = sample_rate;
 		for effect in &mut self.effects {
 			effect.init(sample_rate, self.internal_buffer_size);
 		}
@@ -96,6 +124,62 @@ impl Track {
 		self.shared.clone()
 	}
 
+	/// The tail that needs to flush when the track is removed: the builder's
+	/// explicit tail if set, otherwise the longest tail reported by the
+	/// track's effects.
+	fn effective_removal_tail(&self) -> Option<Duration> {
+		self.removal_tail_duration
+			.into_iter()
+			.chain(
+				self.effects
+					.iter()
+					.filter_map(|effect| effect.tail_duration()),
+			)
+			.max()
+	}
+
+	fn flush_samples(&self) -> u64 {
+		// always keep at least one chunk of processing so the effects get a
+		// chance to output the audio already queued in them
+		let duration_samples = self
+			.effective_removal_tail()
+			.map(|duration| (duration.as_secs_f64() * self.sample_rate as f64).round() as u64)
+			.unwrap_or(0);
+		duration_samples.max(self.internal_buffer_size as u64)
+	}
+
+	/// Coordinates the track's teardown. When the track is first marked for
+	/// removal, all sounds are stopped immediately and the effects enter a
+	/// flushing period so tails already emitted by the sounds have a defined
+	/// destination. The track is only removed once the flush is complete.
+	fn handle_removal(&mut self) {
+		if self.removal_state == RemovalState::Flushing {
+			return;
+		}
+		let marked_for_removal = self.shared().is_marked_for_removal();
+		if self.persist_until_sounds_finish {
+			if !(marked_for_removal && self.sounds.is_empty()) {
+				return;
+			}
+		} else if !marked_for_removal {
+			return;
+		}
+		// stop all sounds in this commit so their handles report Stopped and
+		// streaming decode threads shut down before the resources are dropped
+		for (_, sound) in &mut self.sounds {
+			sound.stop_immediately();
+		}
+		// a paused track outputs silence, which would prevent the effects from
+		// ringing out, so resume at full volume for the flush
+		if !self.playback_state_manager.playback_state().is_advancing() {
+			self.playback_state_manager
+				.resume(StartTime::Immediate, instant_tween());
+			self.update_shared_playback_state();
+		}
+		self.removal_state = RemovalState::Flushing;
+		self.remaining_flush_samples = self.flush_samples();
+	}
+
 	pub fn should_be_removed(&self) -> bool {
 		if self
 			.sub_tracks
@@ -104,21 +188,32 @@ impl Track {
 		{
 			return false;
 		}
-		if self.persist_until_sounds_finish {
-			self.shared().is_marked_for_removal() && self.sounds.is_empty()
-		} else {
-			self.shared().is_marked_for_removal()
+		if self.removal_state != RemovalState::Flushing {
+			return false;
 		}
+		self.remaining_flush_samples == 0
 	}
 
 	pub fn on_start_processing(&mut self) {
+		self.handle_removal();
 		self.read_commands();
-		self.sounds.remove_and_add(|sound| sound.finished());
+		if self.removal_state == RemovalState::Flushing {
+			// don't drop any sounds while flushing: they will be dropped
+			// together with the effects in the final removal commit. new
+			// sounds queued just before the handle was dropped get stopped
+			// alongside the rest of the track.
+			self.sounds.remove_and_add(|_| false);
+			for (_, sound) in &mut self.sounds {
+				sound.stop_immediately();
+			}
+		} else {
+			self.sounds.remove_and_add(|sound| sound.finished());
+		}
 		for (_, sound) in &mut self.sounds {
 			sound.on_start_processing();
 		}
 		self.sub_tracks
-			.remove_and_add(|sub_track| sub_track.should_be_removed());
+			.remove_and_reclaim(|sub_track| sub_track.should_be_removed());
 		for (_, sub_track) in &mut self.sub_tracks {
 			sub_track.on_start_processing();
 		}
@@ -167,6 +262,25 @@ impl Track {
 		if changed_playback_state {
 			self.update_shared_playback_state();
 		}
+		// a pause command queued before the handle was dropped would otherwise
+		// leave the track outputting silence forever, cutting off the effects'
+		// tails; while flushing the track is always kept advancing
+		if self.removal_state == RemovalState::Flushing
+			&& !self.playback_state_manager.playback_state().is_advancing()
+		{
+			self.playback_state_manager
+				.resume(StartTime::Immediate, instant_tween());
+			self.update_shared_playback_state();
+		}
+		// account for the time spent ringing out. counting actual rendered
+		// frames keeps the tail accurate regardless of how the backend chunks
+		// its output buffers. this is done before the advancing check so a
+		// non-advancing track can never get stuck in the flushing state.
+		if self.removal_state == RemovalState::Flushing {
+			self.remaining_flush_samples = self
+				.remaining_flush_samples
+				.saturating_sub(out.len() as u64);
+		}
 		if !self.playback_state_manager.playback_state().is_advancing() {
 			out.fill(Frame::ZERO);
 			return;
@@ -191,13 +305,17 @@ impl Track {
 			self.temp_buffer.fill(Frame::ZERO);
 		}
 
-		// process sounds
-		for (_, sound) in &mut self.sounds {
-			sound.process(&mut self.temp_buffer[..out.len()], dt, &info);
-			for (summed_out, sound_out) in out.iter_mut().zip(self.temp_buffer.iter().copied()) {
-				*summed_out += sound_out;
+		// process sounds (skipped while flushing: the sounds have been
+		// stopped, only the effects' tails remain to be heard)
+		if self.removal_state != RemovalState::Flushing {
+			for (_, sound) in &mut self.sounds {
+				sound.process(&mut self.temp_buffer[..out.len()], dt, &info);
+				for (summed_out, sound_out) in out.iter_mut().zip(self.temp_buffer.iter().copied())
+				{
+					*summed_out += sound_out;
+				}
+				self.temp_buffer.fill(Frame::ZERO);
 			}
-			self.temp_buffer.fill(Frame::ZERO);
 		}
 
 		// apply effects

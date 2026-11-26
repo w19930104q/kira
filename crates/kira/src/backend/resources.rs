@@ -28,6 +28,11 @@ pub(crate) struct ResourceStorage<T> {
 	pub(crate) resources: Arena<T>,
 	new_resource_consumer: Consumer<(Key, T)>,
 	unused_resource_producer: Producer<T>,
+	/// Dedicated channel for resources reclaimed on the audio thread. The
+	/// consumer is held (and drained) on the same thread so the values are
+	/// dropped in the same processing commit that removed them.
+	reclaimed_resource_producer: Producer<T>,
+	reclaimed_resource_consumer: Consumer<T>,
 }
 
 impl<T> ResourceStorage<T> {
@@ -35,6 +40,7 @@ impl<T> ResourceStorage<T> {
 	pub fn new(capacity: usize) -> (Self, ResourceController<T>) {
 		let (new_resource_producer, new_resource_consumer) = RingBuffer::new(capacity);
 		let (unused_resource_producer, unused_resource_consumer) = RingBuffer::new(capacity);
+		let (reclaimed_resource_producer, reclaimed_resource_consumer) = RingBuffer::new(capacity);
 		let resources = Arena::new(capacity);
 		let arena_controller = resources.controller();
 		(
@@ -42,6 +48,8 @@ impl<T> ResourceStorage<T> {
 				resources,
 				new_resource_consumer,
 				unused_resource_producer,
+				reclaimed_resource_producer,
+				reclaimed_resource_consumer,
 			},
 			ResourceController {
 				arena_controller,
@@ -62,6 +70,29 @@ impl<T> ResourceStorage<T> {
 				.insert_with_key(key, resource)
 				.expect("error inserting resource");
 		}
+	}
+
+	/// Removes every resource matching `remove_test` and drops it immediately
+	/// on the audio thread, so reclamation happens in the same processing
+	/// commit as the removal instead of being deferred to the controller.
+	pub fn remove_and_reclaim(&mut self, remove_test: impl FnMut(&T) -> bool) {
+		for (_, resource) in self.resources.drain_filter(remove_test) {
+			self.reclaimed_resource_producer
+				.push(resource)
+				.unwrap_or_else(|_| panic!("reclaimed resource producer is full"));
+		}
+		self.reclaim_unused();
+		while let Ok((key, resource)) = self.new_resource_consumer.pop() {
+			self.resources
+				.insert_with_key(key, resource)
+				.expect("error inserting resource");
+		}
+	}
+
+	/// Drops every resource currently held in the audio-thread reclamation
+	/// channel.
+	pub fn reclaim_unused(&mut self) {
+		while self.reclaimed_resource_consumer.pop().is_ok() {}
 	}
 
 	#[must_use]

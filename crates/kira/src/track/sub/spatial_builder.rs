@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::RangeInclusive, sync::Arc};
+use std::{collections::HashMap, ops::RangeInclusive, sync::Arc, time::Duration};
 
 use glam::Vec3;
 
@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-	Effect, SendTrackId, SendTrackRoute, SpatialData, SpatialTrackHandle, Track, TrackShared,
-	command_writers_and_readers,
+	Effect, RemovalState, SendTrackId, SendTrackRoute, SpatialData, SpatialTrackHandle, Track,
+	TrackShared, command_writers_and_readers,
 };
 
 /// Configures a spatial mixer track.
@@ -30,6 +30,9 @@ pub struct SpatialTrackBuilder {
 	pub(crate) sound_capacity: usize,
 	pub(crate) sends: HashMap<SendTrackId, Value<Decibels>>,
 	pub(crate) persist_until_sounds_finish: bool,
+	/// Overrides how long the track's effects are given to ring out when the
+	/// track is removed. `None` uses the tails reported by the effects.
+	pub(crate) removal_tail_duration: Option<Duration>,
 	/// The distances from a listener at which the track is loudest and quietest.
 	pub(crate) distances: SpatialTrackDistances,
 	/// How the track's volume will change with distance.
@@ -55,6 +58,7 @@ impl SpatialTrackBuilder {
 			sound_capacity: 128,
 			sends: HashMap::new(),
 			persist_until_sounds_finish: false,
+			removal_tail_duration: None,
 			distances: SpatialTrackDistances::default(),
 			attenuation_function: Some(Easing::Linear),
 			spatialization_strength: Value::Fixed(0.75),
@@ -243,6 +247,26 @@ impl SpatialTrackBuilder {
 		}
 	}
 
+	/// Sets how long the track's effects are given to ring out after the
+	/// track is removed.
+	///
+	/// When a track's handle is dropped, its sounds are stopped immediately
+	/// and the effects are kept connected for this duration so any audio
+	/// already emitted by the sounds (such as delay echoes or reverb
+	/// reverberations) can finish playing. Only after this duration are the
+	/// track, its sounds, and its effects all dropped together.
+	///
+	/// By default, this is derived from the tails of the track's effects
+	/// (see [`Effect::tail_duration`](crate::effect::Effect::tail_duration)).
+	/// Set this to [`Duration::ZERO`](std::time::Duration::ZERO) to remove the
+	/// track as soon as possible, with only one chunk of tail.
+	pub fn removal_tail_duration(self, duration: impl Into<Option<Duration>>) -> Self {
+		Self {
+			removal_tail_duration: duration.into(),
+			..self
+		}
+	}
+
 	/// Sets the distances from a listener at which the emitter is loudest and quietest.
 	#[must_use = "This method consumes self and returns a modified SpatialTrackBuilder, so the return value should be used"]
 	pub fn distances(self, distances: impl Into<SpatialTrackDistances>) -> Self {
@@ -321,6 +345,10 @@ impl SpatialTrackBuilder {
 			playback_state_manager: PlaybackStateManager::new(None),
 			temp_buffer: vec![Frame::ZERO; internal_buffer_size],
 			internal_buffer_size,
+			sample_rate: 0,
+			removal_tail_duration: self.removal_tail_duration,
+			removal_state: RemovalState::Active,
+			remaining_flush_samples: 0,
 		};
 		let handle = SpatialTrackHandle {
 			renderer_shared,

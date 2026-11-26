@@ -1,3 +1,13 @@
+# Unreleased
+
+- When a mixer sub-track is removed while sounds are playing, the sounds are
+now stopped immediately and the track's effects are kept connected until
+their tails have flushed, after which the sounds, effects, and track are all
+reclaimed together in a single commit. Previously the effect resources could
+be torn down while the sound handles were still running. The flush duration
+is derived from the effects' tails and can be overridden with
+`TrackBuilder::removal_tail_duration`.
+
 # v0.12.6 - October 27, 2026
 
 - Stop a streaming sound's decode thread when the sound is dropped (thanks @jonatino!)

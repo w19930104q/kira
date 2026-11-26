@@ -6,6 +6,8 @@ mod handle;
 pub use builder::*;
 pub use handle::*;
 
+use std::time::Duration;
+
 use crate::{
 	Mix, Parameter,
 	command::{ValueChangeCommand, read_commands_into_parameters},
@@ -135,6 +137,18 @@ impl Effect for Reverb {
 
 	fn on_start_processing(&mut self) {
 		read_commands_into_parameters!(self, feedback, damping, stereo_width, mix);
+	}
+
+	/// The comb filters hold up to ~36.7 ms of audio at the reference sample
+	/// rate (1617 samples at 44.1 kHz). With the default feedback of 0.9, the
+	/// echoes take roughly 2.4 seconds to decay to 0.1% of their input, so the
+	/// reverb is given that long to ring out when its track is removed.
+	///
+	/// If the feedback is increased beyond the default, the decay may take
+	/// longer; configure the tail explicitly through
+	/// `TrackBuilder::removal_tail_duration` in that case.
+	fn tail_duration(&self) -> Option<Duration> {
+		Some(Duration::from_secs_f64(2.4))
 	}
 
 	fn process(&mut self, input: &mut [Frame], dt: f64, info: &Info) {

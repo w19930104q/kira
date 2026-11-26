@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
 	Decibels, Frame, Parameter, Value,
@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-	Effect, SendTrackId, SendTrackRoute, Track, TrackHandle, TrackShared,
+	Effect, RemovalState, SendTrackId, SendTrackRoute, Track, TrackHandle, TrackShared,
 	command_writers_and_readers,
 };
 
@@ -26,6 +26,9 @@ pub struct TrackBuilder {
 	pub(crate) sound_capacity: usize,
 	pub(crate) sends: HashMap<SendTrackId, Value<Decibels>>,
 	pub(crate) persist_until_sounds_finish: bool,
+	/// Overrides how long the track's effects are given to ring out when the
+	/// track is removed. `None` uses the tails reported by the effects.
+	pub(crate) removal_tail_duration: Option<Duration>,
 }
 
 impl TrackBuilder {
@@ -39,6 +42,7 @@ impl TrackBuilder {
 			sound_capacity: 128,
 			sends: HashMap::new(),
 			persist_until_sounds_finish: false,
+			removal_tail_duration: None,
 		}
 	}
 
@@ -224,6 +228,26 @@ impl TrackBuilder {
 		}
 	}
 
+	/// Sets how long the track's effects are given to ring out after the
+	/// track is removed.
+	///
+	/// When a track's handle is dropped, its sounds are stopped immediately
+	/// and the effects are kept connected for this duration so any audio
+	/// already emitted by the sounds (such as delay echoes or reverb
+	/// reverberations) can finish playing. Only after this duration are the
+	/// track, its sounds, and its effects all dropped together.
+	///
+	/// By default, this is derived from the tails of the track's effects
+	/// (see [`Effect::tail_duration`](crate::effect::Effect::tail_duration)).
+	/// Set this to [`Duration::ZERO`](std::time::Duration::ZERO) to remove the
+	/// track as soon as possible, with only one chunk of tail.
+	pub fn removal_tail_duration(self, duration: impl Into<Option<Duration>>) -> Self {
+		Self {
+			removal_tail_duration: duration.into(),
+			..self
+		}
+	}
+
 	#[must_use]
 	pub(crate) fn build(
 		self,
@@ -261,6 +285,10 @@ impl TrackBuilder {
 			playback_state_manager: PlaybackStateManager::new(None),
 			temp_buffer: vec![Frame::ZERO; internal_buffer_size],
 			internal_buffer_size,
+			sample_rate: 0,
+			removal_tail_duration: self.removal_tail_duration,
+			removal_state: RemovalState::Active,
+			remaining_flush_samples: 0,
 		};
 		let handle = TrackHandle {
 			renderer_shared,

@@ -18,6 +18,8 @@ pub mod panning_control;
 pub mod reverb;
 pub mod volume_control;
 
+use std::time::Duration;
+
 use crate::{frame::Frame, info::Info};
 
 /// Configures an effect.
@@ -52,4 +54,22 @@ pub trait Effect: Send {
 	///
 	/// `dt` is the time between each frame (in seconds).
 	fn process(&mut self, input: &mut [Frame], dt: f64, info: &Info);
+
+	/// How long the effect can continue producing audio after all of its
+	/// inputs have gone silent.
+	///
+	/// When a mixer track is removed, its sounds are stopped immediately and
+	/// the effects are kept connected for this long so their tail rings out
+	/// before the effect resources are dropped. Returning `None` means the
+	/// effect has no tail and does not need extra time (beyond one processing
+	/// chunk) to flush.
+	///
+	/// This is called on the audio thread when the track's removal begins, so
+	/// the returned duration may reflect the effect's current settings. If a
+	/// fixed or longer tail is needed, it can be configured explicitly through
+	/// `TrackBuilder::removal_tail_duration`, which takes precedence over this
+	/// value.
+	fn tail_duration(&self) -> Option<Duration> {
+		None
+	}
 }

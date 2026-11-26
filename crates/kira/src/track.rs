@@ -101,6 +101,18 @@ filter.set_cutoff(4000.0, Tween::default());
 # Result::<(), Box<dyn std::error::Error>>::Ok(())
 ```
 
+## Removing tracks
+
+Dropping a [`TrackHandle`] marks the track for removal. Sounds playing on the
+track are stopped immediately, so their handles report
+[`PlaybackState::Stopped`] and any background decode threads shut down. The
+track's effects are then kept connected for as long as their tails need to
+ring out — delay echoes and reverb reverberations already emitted before the
+removal keep playing instead of being cut off. Only after the tails have
+flushed are the sounds, effects, and track itself reclaimed together in a
+single commit. The flush duration can be customized with
+[`TrackBuilder::removal_tail_duration`].
+
 ## Send tracks
 
 Sometimes, you may want to share effects across multiple tracks. For example, let's say

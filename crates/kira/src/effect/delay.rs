@@ -69,6 +69,19 @@ impl Effect for Delay {
 		}
 	}
 
+	/// The delay's echo line stores at least `delay_time` seconds of audio,
+	/// so it can keep echoing for that long after the input goes silent.
+	/// Feedback effects may add a longer tail; if the feedback is set high
+	/// enough to loop indefinitely, the tail should be configured explicitly
+	/// through `TrackBuilder::removal_tail_duration`.
+	fn tail_duration(&self) -> Option<Duration> {
+		let mut duration = Some(self.delay_time);
+		for effect in &self.feedback_effects {
+			duration = duration.max(effect.tail_duration());
+		}
+		duration
+	}
+
 	fn process(&mut self, input: &mut [Frame], dt: f64, info: &Info) {
 		self.feedback.update(dt * input.len() as f64, info);
 		self.mix.update(dt * input.len() as f64, info);

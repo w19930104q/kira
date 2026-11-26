@@ -58,13 +58,16 @@ impl Mixer {
 	}
 
 	pub fn on_start_processing(&mut self) {
+		// removed tracks are dropped on the audio thread right away so that
+		// sound stop, effect disconnection, and resource reclamation all
+		// happen in the same processing commit
 		self.sub_tracks
-			.remove_and_add(|track| track.should_be_removed());
+			.remove_and_reclaim(|track| track.should_be_removed());
 		for (_, track) in &mut self.sub_tracks {
 			track.on_start_processing();
 		}
 		self.send_tracks
-			.remove_and_add(|track| track.shared().is_marked_for_removal());
+			.remove_and_reclaim(|track| track.shared().is_marked_for_removal());
 		for (_, track) in &mut self.send_tracks {
 			track.on_start_processing();
 		}

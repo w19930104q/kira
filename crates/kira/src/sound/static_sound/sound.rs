@@ -244,6 +244,11 @@ impl Sound for StaticSound {
 	fn finished(&self) -> bool {
 		self.playback_state_manager.playback_state() == PlaybackState::Stopped
 	}
+
+	fn stop_immediately(&mut self) {
+		self.playback_state_manager.mark_as_stopped();
+		self.update_shared_playback_state();
+	}
 }
 
 #[derive(Debug)]
