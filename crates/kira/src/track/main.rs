@@ -33,6 +33,9 @@ impl MainTrack {
 		for effect in &mut self.effects {
 			effect.on_change_sample_rate(sample_rate);
 		}
+		for (_, sound) in &mut self.sounds {
+			sound.on_change_sample_rate(sample_rate);
+		}
 	}
 
 	pub fn on_start_processing(&mut self) {

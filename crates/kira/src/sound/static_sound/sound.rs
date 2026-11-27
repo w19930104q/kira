@@ -193,6 +193,14 @@ impl Sound for StaticSound {
 		self.read_commands();
 	}
 
+	fn on_change_sample_rate(&mut self, sample_rate: u32) {
+		let old_sample_rate = self.sample_rate;
+		self.sample_rate = sample_rate;
+		// Adjust fractional_position to preserve playback position in seconds
+		// This prevents frame skipping when the sample rate changes
+		self.fractional_position *= sample_rate as f64 / old_sample_rate as f64;
+	}
+
 	fn process(&mut self, out: &mut [Frame], dt: f64, info: &Info) {
 		// update parameters
 		self.volume.update(dt * out.len() as f64, info);

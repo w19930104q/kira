@@ -65,6 +65,14 @@ pub trait Sound: Send {
 	/// but not for every single audio sample.
 	fn on_start_processing(&mut self) {}
 
+	/// Called when the output device sample rate changes.
+	///
+	/// Implementations should update their internal sample rate to match
+	/// the new value without skipping or resetting the playback position.
+	fn on_change_sample_rate(&mut self, sample_rate: u32) {
+		let _ = sample_rate;
+	}
+
 	/// Produces the next [`Frame`]s of audio. This should overwrite
 	/// the entire `out` slice with new audio.
 	///

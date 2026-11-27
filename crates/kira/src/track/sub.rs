@@ -86,6 +86,9 @@ impl Track {
 		for effect in &mut self.effects {
 			effect.on_change_sample_rate(sample_rate);
 		}
+		for (_, sound) in &mut self.sounds {
+			sound.on_change_sample_rate(sample_rate);
+		}
 		for (_, sub_track) in &mut self.sub_tracks {
 			sub_track.on_change_sample_rate(sample_rate);
 		}

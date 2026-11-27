@@ -224,6 +224,10 @@ impl Sound for StreamingSound {
 		self.read_commands();
 	}
 
+	fn on_change_sample_rate(&mut self, sample_rate: u32) {
+		self.sample_rate = sample_rate;
+	}
+
 	fn process(&mut self, out: &mut [Frame], dt: f64, info: &Info) {
 		if self.shared.encountered_error() {
 			self.playback_state_manager.mark_as_stopped();

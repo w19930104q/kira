@@ -143,6 +143,25 @@ impl StreamManager {
 		handled_stream_error_producer: &mut Producer<cpal::Error>,
 		num_stream_errors_discarded: &Arc<AtomicU64>,
 	) {
+		// If the stream failed to start previously, keep trying
+		if let State::Idle { .. } = &self.state {
+			if let Ok((device, mut config)) = default_device_and_config() {
+				match self.start_stream(
+					&device,
+					&mut config,
+					num_stream_errors_discarded.clone(),
+				) {
+					Ok(new_consumer) => {
+						*unhandled_stream_error_consumer = new_consumer;
+					}
+					Err(_) => {
+						// Will retry on the next cycle
+					}
+				}
+			}
+			return;
+		}
+
 		if let State::Running { .. } = &self.state {
 			while let Ok(error) = unhandled_stream_error_consumer.pop() {
 				match error.kind() {
@@ -150,14 +169,20 @@ impl StreamManager {
 					cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
 						self.stop_stream();
 						if let Ok((device, mut config)) = default_device_and_config() {
-							// TODO: gracefully handle errors that occur in this function
-							*unhandled_stream_error_consumer = self
+							match self
 								.start_stream(
 									&device,
 									&mut config,
 									num_stream_errors_discarded.clone(),
 								)
-								.unwrap();
+							{
+								Ok(new_consumer) => {
+									*unhandled_stream_error_consumer = new_consumer;
+								}
+								Err(err) => {
+									let _ = handled_stream_error_producer.push(err);
+								}
+							}
 						}
 					}
 					// cpal::ErrorKind::BackendSpecific { err: _ } | StreamError::BufferUnderrun => {}
@@ -181,9 +206,17 @@ impl StreamManager {
 					let sample_rate = config.sample_rate;
 					if device_id != self.device_id || sample_rate != self.sample_rate {
 						self.stop_stream();
-						*unhandled_stream_error_consumer = self
+					match self
 							.start_stream(&device, &mut config, num_stream_errors_discarded.clone())
-							.unwrap();
+					{
+						Ok(new_consumer) => {
+							*unhandled_stream_error_consumer = new_consumer;
+						}
+						Err(_) => {
+							// Failed to start stream with new device; renderer is preserved
+							// in Idle state and will be retried on the next cycle
+						}
+					}
 					}
 				}
 			}
@@ -196,7 +229,7 @@ impl StreamManager {
 		config: &mut StreamConfig,
 		num_stream_errors_discarded: Arc<AtomicU64>,
 	) -> Result<Consumer<cpal::Error>, Error> {
-		let mut renderer =
+		let renderer =
 			if let State::Idle { renderer } = std::mem::replace(&mut self.state, State::Empty) {
 				renderer
 			} else {
@@ -205,16 +238,11 @@ impl StreamManager {
 		config.buffer_size = self.buffer_size; // this won't change anything if the buffer size is BufferSize::Default
 		let device_id = device_id(device);
 		let sample_rate = config.sample_rate;
-		if sample_rate != self.sample_rate {
-			renderer.on_change_sample_rate(sample_rate);
-		}
-		self.device_id = device_id;
-		self.sample_rate = sample_rate;
 		let (mut renderer_wrapper, renderer_consumer) = SendOnDrop::new(renderer);
 		let (mut unhandled_stream_error_producer, unhandled_stream_error_consumer) =
 			RingBuffer::new(64);
 		let channels = config.channels;
-		let stream = device.build_output_stream(
+		let stream = match device.build_output_stream(
 			*config,
 			move |data: &mut [f32], _| {
 				#[cfg(feature = "assert_no_alloc")]
@@ -231,8 +259,40 @@ impl StreamManager {
 				}
 			},
 			None,
-		)?;
-		stream.play()?;
+		) {
+			Ok(stream) => stream,
+			Err(err) => {
+				// renderer_wrapper was dropped → renderer sent back via channel
+				let renderer = renderer_consumer.pop()
+					.expect("Could not retrieve renderer after failed stream build");
+				if sample_rate != self.sample_rate {
+					renderer.on_change_sample_rate(sample_rate);
+				}
+				self.device_id = device_id;
+				self.sample_rate = sample_rate;
+				self.state = State::Idle { renderer };
+				return Err(Error::Cpal(err));
+			}
+		};
+		if let Err(err) = stream.play() {
+			drop(stream);
+			let renderer = renderer_consumer.pop()
+				.expect("Could not retrieve renderer after failed stream play");
+			if sample_rate != self.sample_rate {
+				renderer.on_change_sample_rate(sample_rate);
+			}
+			self.device_id = device_id;
+			self.sample_rate = sample_rate;
+			self.state = State::Idle { renderer };
+			return Err(Error::Cpal(err));
+		}
+		if sample_rate != self.sample_rate {
+			// on_change_sample_rate is called via deref on the renderer;
+			// for the running stream we need to notify through the wrapper
+			renderer_wrapper.on_change_sample_rate(sample_rate);
+		}
+		self.device_id = device_id;
+		self.sample_rate = sample_rate;
 		self.state = State::Running {
 			stream,
 			renderer_consumer,
