@@ -130,6 +130,7 @@ impl StaticSound {
 	fn seek_to_index(&mut self, index: usize) {
 		self.transport
 			.seek_to(index, num_frames(&self.frames, self.slice));
+		self.fractional_position = 0.0;
 		// if the sound is playing, push a frame to the resample buffer
 		// to make sure it doesn't get skipped
 		if self.playback_state_manager.playback_state().is_advancing() {
@@ -186,8 +187,9 @@ impl StaticSound {
 impl Sound for StaticSound {
 	fn on_start_processing(&mut self) {
 		let last_played_frame_position = self.resampler.current_frame_index();
+		let position = last_played_frame_position as f64 + self.fractional_position;
 		self.shared.position.store(
-			(last_played_frame_position as f64 / self.sample_rate as f64).to_bits(),
+			(position / self.sample_rate as f64).to_bits(),
 			Ordering::SeqCst,
 		);
 		self.read_commands();
@@ -232,7 +234,12 @@ impl Sound for StaticSound {
 			let panning = self.panning.interpolated_value(time_in_chunk);
 			let playback_rate = self.playback_rate.interpolated_value(time_in_chunk);
 			let resampler_out = self.resampler.get(self.fractional_position as f32);
-			self.fractional_position += self.sample_rate as f64 * playback_rate.0.abs() * dt;
+			let rate_abs = playback_rate.0.abs();
+			if rate_abs == 0.0 {
+				*frame = Frame::ZERO;
+				continue;
+			}
+			self.fractional_position += self.sample_rate as f64 * rate_abs * dt;
 			while self.fractional_position >= 1.0 {
 				self.fractional_position -= 1.0;
 				self.update_position();

@@ -839,3 +839,97 @@ fn reverse() {
 		);
 	}
 }
+
+/// Tests that position tracks continuously with fractional component
+/// and that zero playback rate acts as pause (zero output, frozen position).
+#[test]
+#[allow(clippy::float_cmp)]
+fn continuous_position_with_playback_rate_changes() {
+	let sample_rate: u32 = 100;
+	// 2 seconds of audio = 200 frames
+	let frames: std::sync::Arc<[Frame]> = (0..200)
+		.map(|i| Frame::from_mono(i as f32 / 200.0))
+		.collect::<Vec<_>>()
+		.into();
+	let data = StaticSoundData {
+		sample_rate,
+		frames: frames.clone(),
+		settings: StaticSoundSettings::new(),
+		slice: None,
+	};
+	let (mut sound, mut handle) = data.split();
+	let info = MockInfoBuilder::new().build();
+
+	// --- Phase 1: play at 1x for 0.5 seconds (50 output frames) ---
+	let mut out = vec![Frame::ZERO; 50];
+	sound.process(&mut out, 1.0 / sample_rate as f64, &info);
+	sound.on_start_processing();
+	let pos_after_1x = handle.position();
+	// position should be approximately 0.5 seconds (50 / 100 = 0.5)
+	assert!((pos_after_1x - 0.5).abs() < 0.02, "pos after 1x: {}", pos_after_1x);
+
+	// --- Phase 2: change to 2x speed ---
+	handle.set_playback_rate(
+		2.0,
+		Tween {
+			duration: Duration::ZERO,
+			..Default::default()
+		},
+	);
+	sound.on_start_processing();
+
+	// play 0.25 seconds of output at 2x (25 output frames)
+	let mut out = vec![Frame::ZERO; 25];
+	sound.process(&mut out, 1.0 / sample_rate as f64, &info);
+	sound.on_start_processing();
+	let pos_after_2x = handle.position();
+	// At 2x for 0.25s real time, source advances 0.5s.
+	// Expected: 0.5 + 0.5 = 1.0
+	assert!((pos_after_2x - 1.0).abs() < 0.03, "pos after 2x: {}", pos_after_2x);
+
+	// --- Phase 3: change to 0x speed (should be equivalent to pause) ---
+	handle.set_playback_rate(
+		0.0,
+		Tween {
+			duration: Duration::ZERO,
+			..Default::default()
+		},
+	);
+	sound.on_start_processing();
+
+	// process 50 output frames at 0x
+	let mut out = vec![Frame::ZERO; 50];
+	sound.process(&mut out, 1.0 / sample_rate as f64, &info);
+	sound.on_start_processing();
+	let pos_after_0x = handle.position();
+	// position should not have advanced
+	assert!((pos_after_0x - pos_after_2x).abs() < 0.001,
+		"pos after 0x: {}, expected ~{}", pos_after_0x, pos_after_2x);
+	// all output should be silent
+	for frame in &out {
+		assert_eq!(frame.left, 0.0);
+		assert_eq!(frame.right, 0.0);
+	}
+
+	// --- Phase 4: resume from 0x back to 1x ---
+	handle.set_playback_rate(
+		1.0,
+		Tween {
+			duration: Duration::ZERO,
+			..Default::default()
+		},
+	);
+	sound.on_start_processing();
+
+	// play 0.5 seconds at 1x (50 output frames)
+	let mut out = vec![Frame::ZERO; 50];
+	sound.process(&mut out, 1.0 / sample_rate as f64, &info);
+	sound.on_start_processing();
+	let pos_after_resume = handle.position();
+	// Expected: ~1.0 + 0.5 = 1.5
+	assert!((pos_after_resume - 1.5).abs() < 0.03,
+		"pos after resume: {}, expected ~1.5", pos_after_resume);
+	// output should be non-silent
+	let has_sound = out.iter().any(|f| f.left != 0.0 || f.right != 0.0);
+	assert!(has_sound, "output should be non-silent after resume");
+}

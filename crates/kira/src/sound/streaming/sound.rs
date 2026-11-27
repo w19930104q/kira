@@ -283,7 +283,12 @@ impl Sound for StreamingSound {
 				next_frames[3],
 				self.fractional_position as f32,
 			);
-			self.fractional_position += self.sample_rate as f64 * playback_rate.0.max(0.0) * dt;
+			let rate_abs = playback_rate.0.abs();
+			if rate_abs == 0.0 {
+				*frame = Frame::ZERO;
+				continue;
+			}
+			self.fractional_position += self.sample_rate as f64 * rate_abs * dt;
 			while self.fractional_position >= 1.0 {
 				self.fractional_position -= 1.0;
 				self.frame_consumer.pop().ok();
