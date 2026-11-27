@@ -69,18 +69,18 @@ impl SendTrack {
 
 	pub fn process(&mut self, out: &mut [Frame], dt: f64, info: &Info) {
 		self.volume.update(dt * out.len() as f64, info);
+		let num_frames = out.len();
 		for (out_frame, input_frame) in out.iter_mut().zip(self.input.iter().copied()) {
 			*out_frame += input_frame;
 		}
 		self.input.fill(Frame::ZERO);
-		for effect in &mut self.effects {
-			effect.process(out, dt, info);
-		}
-		let num_frames = out.len();
 		for (i, frame) in out.iter_mut().enumerate() {
 			let time_in_chunk = (i + 1) as f64 / num_frames as f64;
 			let volume = self.volume.interpolated_value(time_in_chunk).as_amplitude();
 			*frame *= volume;
+		}
+		for effect in &mut self.effects {
+			effect.process(out, dt, info);
 		}
 	}
 }
